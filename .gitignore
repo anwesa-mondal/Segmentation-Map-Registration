@@ -1,0 +1,116 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# PyTorch
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.pickle
+
+# Training Outputs
+logs/
+checkpoints/
+visualizations/
+weights/
+models/
+runs/
+outputs/
+results/
+
+# Tensorboard
+events.out.tfevents.*
+
+# Weights & Biases
+wandb/
+
+# Data Files (large files)
+*.npy
+*.npz
+*.nii
+*.nii.gz
+*.h5
+*.hdf5
+*.mat
+
+# Dataset Lists (optional - uncomment if you want to ignore)
+# train.txt
+# val.txt
+# test.txt
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment Variables
+.env
+.env.local
+
+# Temporary Files
+*.tmp
+*.temp
+*.log
+*.out
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Documentation
+docs/_build/
+site/
+
+# Specific to this project
+training_test_*/
+training_metrics_*.csv
+training_summary_*.json
+config_*.json
+final_results_*.json
+*.png
+*.jpg
+*.jpeg
+

@@ -1,5 +1,5 @@
 import torch
-from losses_2 import (
+from losses import (
     dice_loss,
     cross_entropy_loss,
     lambda_weighted_smoothness_loss,
