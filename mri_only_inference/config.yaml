@@ -1,0 +1,161 @@
+# =============================================================================
+# MRI Registration Configuration
+# =============================================================================
+# Configuration file for MRI-based brain registration with anatomical guidance.
+# Edit this file to customize training, data paths, and model parameters.
+
+# -----------------------------------------------------------------------------
+# Data Paths
+# -----------------------------------------------------------------------------
+data:
+  # Training and validation data lists (text files with paths to subjects)
+  train_txt: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/train.txt"
+  val_txt: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/val.txt"
+  
+  # Template subject (used as reference for registration)
+  template_mri_path: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/brain.npy"
+  template_seg_path: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/seg4_onehot.npy"
+  
+  # Data directory (for convert_brain_mri.py)
+  main_dir: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans"
+  subjects_txt: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/subjects.txt"
+  
+  # File naming conventions
+  mri_filename: "brain.npy"
+  seg_filename: "seg4_onehot.npy"
+  input_nifti: "norm.nii.gz"
+
+# -----------------------------------------------------------------------------
+# Output Configuration
+# -----------------------------------------------------------------------------
+output:
+  # Base directory for training outputs (timestamp will be appended)
+  base_dir: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/training_mri_acm"
+  
+  # Subdirectory names
+  checkpoint_subdir: "checkpoints"
+  log_subdir: "logs"
+  viz_subdir: "viz_output"
+
+# -----------------------------------------------------------------------------
+# Model Architecture
+# -----------------------------------------------------------------------------
+model:
+  # Input/output dimensions
+  target_size: [128, 128, 128]  # (D, H, W) - volume dimensions after resizing
+  num_classes: 5                 # Number of segmentation classes (including background)
+  seg_channels: 5                # Same as num_classes for one-hot encoding
+
+# -----------------------------------------------------------------------------
+# Training Hyperparameters
+# -----------------------------------------------------------------------------
+training:
+  # Basic training settings
+  batch_size: 1
+  num_epochs: 60
+  num_workers: 0                 # DataLoader workers (0 for debugging)
+  pin_memory: true
+  
+  # Optimizer settings (AdamW)
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-6
+  weight_decay: 1.0e-5
+  
+  # Learning rate schedule
+  warmup_epochs: 5               # Linear warmup before cosine annealing
+  
+  # Mixed precision training
+  use_amp: false                 # Automatic Mixed Precision
+  
+  # Checkpointing and early stopping
+  save_every: 10                 # Save checkpoint every N epochs
+  patience: 15                   # Early stopping patience (epochs without improvement)
+  
+  # Gradient clipping
+  max_grad_norm: 1.0
+
+# -----------------------------------------------------------------------------
+# Data Augmentation
+# -----------------------------------------------------------------------------
+augmentation:
+  # Contrast augmentation makes model robust to different MRI weightings (T1/T2/FLAIR)
+  contrast_augmentation: true
+  
+  # Contrast augmentation parameters (used in get_data_mri.py)
+  gamma_range: [0.5, 2.0]        # Gamma correction range
+  scale_range: [0.7, 1.3]        # Intensity scaling range
+  offset_range: [-0.2, 0.2]      # Intensity offset range
+  histogram_alpha_range: [0.8, 1.2]  # Histogram compression/expansion
+  inversion_prob: 0.2            # Probability of intensity inversion
+
+# -----------------------------------------------------------------------------
+# Loss Function Weights
+# -----------------------------------------------------------------------------
+loss:
+  # MRI intensity losses
+  ncc: 1.0                       # Normalized Cross Correlation (primary MRI matching)
+  mse: 0.0                       # Mean Squared Error (optional)
+  
+  # Segmentation alignment losses
+  dice: 0.5                      # Dice loss for segmentation overlap
+  focal: 0.0                     # Focal loss for hard examples
+  boundary: 0.1                  # Boundary alignment loss
+  
+  # Geometric regularization
+  smoothness: 0.01               # First-order smoothness
+  bending: 0.001                 # Second-order smoothness (bending energy)
+  jacobian: 0.1                  # Jacobian determinant (prevents folding)
+  displacement: 0.001            # Penalizes large displacements
+  
+  # Lambda-based adaptive regularization
+  lambda_smoothness: 0.05        # Spatially-adaptive smoothness
+  lambda_prior: 0.01             # Lambda regularization
+  
+  # Multi-scale consistency
+  multi_scale: 0.01              # Consistency between flow scales
+
+# -----------------------------------------------------------------------------
+# Device Configuration
+# -----------------------------------------------------------------------------
+device:
+  # CUDA device (e.g., "cuda:0", "cuda:4", or "cpu")
+  gpu: "cuda:4"
+  
+  # Enable cuDNN benchmark for faster training (disable for reproducibility)
+  cudnn_benchmark: true
+
+# -----------------------------------------------------------------------------
+# Visualization Settings
+# -----------------------------------------------------------------------------
+visualization:
+  # Number of samples to visualize
+  num_samples: 30                # Total samples (-1 for all)
+  detailed_samples: 10           # Samples with full visualization
+  
+  # Random seed for reproducible sampling
+  seed: 42
+  
+  # Class names for OASIS brain segmentation
+  class_names:
+    - "Background"
+    - "CSF"
+    - "Gray Matter"
+    - "White Matter"
+    - "Deep GM"
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  # Log level (DEBUG, INFO, WARNING, ERROR)
+  level: "INFO"
+  
+  # Log format
+  format: "%(asctime)s | %(levelname)s | %(message)s"
+
+# -----------------------------------------------------------------------------
+# Resume Training
+# -----------------------------------------------------------------------------
+resume:
+  # Path to checkpoint to resume from (null to start fresh)
+  checkpoint_path: null
