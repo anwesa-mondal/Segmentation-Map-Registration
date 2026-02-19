@@ -9,7 +9,7 @@ import pandas as pd
 
 from get_data import SegDataset
 from compoundlossfunction_2 import compound_loss
-from model_1 import UNet, SpatialTransformer
+from model_1 import UNet, SpatialTransformer, AffineNet, affine_to_dense_displacement
 
 # ----------------- Paths ----------------- #
 train_txt = "/content/drive/MyDrive/train_npy.txt"
@@ -45,10 +45,12 @@ test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=
 print(f"Dataset split: {train_size} train, {test_size} test")
 
 # ----------------- Model + Optimizer ----------------- #
+affine_net = AffineNet(in_channels=10).to(device)
 unet = UNet(in_channels=10, out_channels_flow=3, out_channels_lambda=1).to(device)
 stn = SpatialTransformer(size=target_size, device=device).to(device)
 
-optimizer = torch.optim.Adam(unet.parameters(), lr=learning_rate, weight_decay=weight_decay)
+all_params = list(affine_net.parameters()) + list(unet.parameters())
+optimizer = torch.optim.Adam(all_params, lr=learning_rate, weight_decay=weight_decay)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
 # ----------------- Dynamic Loss Weights ----------------- #
@@ -161,6 +163,7 @@ best_model_path = "/content/drive/MyDrive/trained_model.pth"
 
 # ----------------- Training ----------------- #
 for epoch in range(1, num_epochs + 1):
+    affine_net.train()
     unet.train()
     total_loss = 0
     loss_weights = get_loss_weights(epoch)
@@ -170,12 +173,22 @@ for epoch in range(1, num_epochs + 1):
     print(f"\n--- Epoch {epoch}/{num_epochs} ---")
     for batch_idx, (moving, fixed) in enumerate(train_loader):
         moving, fixed = moving.to(device, non_blocking=True), fixed.to(device, non_blocking=True)
-        x = torch.cat([moving, fixed], dim=1)
 
         with torch.cuda.amp.autocast(enabled=use_amp):
+            # Stage 1: affine pre-alignment
+            affine_matrix = affine_net(moving, fixed)                       # (B, 4, 4)
+            affine_disp = affine_to_dense_displacement(affine_matrix, target_size)  # (B, 3, D, H, W)
+            moving_affine = stn(moving, affine_disp)
+
+            # Stage 2: UNet predicts residual deformation on top of affine-aligned pair
+            x = torch.cat([moving_affine, fixed], dim=1)
             flow, lambda_map = unet(x)
-            warped = stn(moving, flow)
-            loss, loss_dict = compound_loss(warped, fixed, flow, lambda_map, loss_weights)
+
+            # Compose: total displacement = affine_disp + residual flow
+            total_flow = affine_disp + flow
+            warped = stn(moving, total_flow)
+
+            loss, loss_dict = compound_loss(warped, fixed, total_flow, lambda_map, loss_weights)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -198,14 +211,19 @@ for epoch in range(1, num_epochs + 1):
     scheduler.step(avg_loss)
 
     # --- Evaluation on test set --- #
+    affine_net.eval()
     unet.eval()
     with torch.no_grad():
         dice_vals = []
         for moving, fixed in test_loader:
             moving, fixed = moving.to(device), fixed.to(device)
-            x = torch.cat([moving, fixed], dim=1)
+            affine_matrix = affine_net(moving, fixed)
+            affine_disp = affine_to_dense_displacement(affine_matrix, target_size)
+            moving_affine = stn(moving, affine_disp)
+            x = torch.cat([moving_affine, fixed], dim=1)
             flow, lambda_map = unet(x)
-            warped = stn(moving, flow)
+            total_flow = affine_disp + flow
+            warped = stn(moving, total_flow)
             dice_vals.append(dice_score(warped, fixed).mean().item())
         avg_dice = np.mean(dice_vals)
 
@@ -213,12 +231,13 @@ for epoch in range(1, num_epochs + 1):
         best_dice = avg_dice
         torch.save({
             "epoch": epoch,
+            "affine_state_dict": affine_net.state_dict(),
             "model_state_dict": unet.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "dice": best_dice,
             "loss": avg_loss,
         }, best_model_path)
-        print(f"🔥 Saved new best model at epoch {epoch} with Dice {best_dice:.4f}")
+        print(f"Saved new best model at epoch {epoch} with Dice {best_dice:.4f}")
 
     # Logging
     loss_break = {k: round(v, 5) for k, v in avg_loss_dict.items()}
@@ -251,6 +270,7 @@ plt.grid(True)
 plt.show()
 
 # ----------------- Final Visualization ----------------- #
+affine_net.eval()
 unet.eval()
 stn.eval()
 
