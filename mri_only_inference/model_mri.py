@@ -23,16 +23,16 @@ import torch.nn.functional as F
 # =============================================================================
 
 class ConvBlock(nn.Module):
-    """Basic conv block with InstanceNorm and ReLU."""
+    """Basic conv block with InstanceNorm and LeakyReLU."""
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.InstanceNorm3d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(0.2, inplace=True)
         )
     
     def forward(self, x):
@@ -189,7 +189,7 @@ class DualStreamEncoder(nn.Module):
         attention_maps.append(attn1)
         
         # Scale 2
-        mri_p1 = self.pool(mri_e1)
+        mri_p1 = self.pool(fused_e1)
         seg_p1 = self.pool(seg_e1)
         mri_e2 = self.enc2(mri_p1)
         seg_e2 = self.seg_enc2(seg_p1)
@@ -198,7 +198,7 @@ class DualStreamEncoder(nn.Module):
         attention_maps.append(attn2)
         
         # Scale 3
-        mri_p2 = self.pool(mri_e2)
+        mri_p2 = self.pool(fused_e2)
         seg_p2 = self.pool(seg_e2)
         mri_e3 = self.enc3(mri_p2)
         seg_e3 = self.seg_enc3(seg_p2)
@@ -207,7 +207,7 @@ class DualStreamEncoder(nn.Module):
         attention_maps.append(attn3)
         
         # Scale 4
-        mri_p3 = self.pool(mri_e3)
+        mri_p3 = self.pool(fused_e3)
         seg_p3 = self.pool(seg_e3)
         mri_e4 = self.enc4(mri_p3)
         seg_e4 = self.seg_enc4(seg_p3)
@@ -265,7 +265,7 @@ class MultiScaleDecoder(nn.Module):
         
         # Initialize flow layers to near-zero
         for flow_layer in [self.flow1, self.flow2, self.flow3, self.flow4]:
-            nn.init.normal_(flow_layer.weight, 0, 1e-5)
+            nn.init.normal_(flow_layer.weight, 0, 1e-3)
             nn.init.zeros_(flow_layer.bias)
     
     def forward(self, bottleneck, skip_connections, template_seg):

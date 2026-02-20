@@ -57,6 +57,11 @@ def ncc_loss(y_pred, y_true, win=9):
     return 1 - torch.mean(cc)
 
 
+def multi_scale_ncc_loss(y_pred, y_true, windows=(5, 9, 13)):
+    """Multi-scale NCC capturing fine details (win=5) and global patterns (win=13)."""
+    return sum(ncc_loss(y_pred, y_true, win=w) for w in windows) / len(windows)
+
+
 def mse_loss(y_pred, y_true):
     """Mean Squared Error for MRI intensity matching."""
     return F.mse_loss(y_pred, y_true)
@@ -140,9 +145,12 @@ def bending_energy_loss(flow):
 
 def jacobian_det_loss(flow):
     """
-    Jacobian determinant loss - penalizes folding (negative determinants).
+    Jacobian determinant loss with log-Jacobian regularization.
+    
+    Combines anti-folding (penalize det < 0) with volume-preservation
+    (penalize deviation of det from 1). The log term provides useful
+    gradients even when there is no folding.
     """
-    # Compute spatial gradients
     dx_dx = flow[:, 0, 1:, :, :] - flow[:, 0, :-1, :, :]
     dx_dy = flow[:, 0, :, 1:, :] - flow[:, 0, :, :-1, :]
     dx_dz = flow[:, 0, :, :, 1:] - flow[:, 0, :, :, :-1]
@@ -155,7 +163,6 @@ def jacobian_det_loss(flow):
     dz_dy = flow[:, 2, :, 1:, :] - flow[:, 2, :, :-1, :]
     dz_dz = flow[:, 2, :, :, 1:] - flow[:, 2, :, :, :-1]
     
-    # Pad to maintain size
     dx_dx = F.pad(dx_dx, (0, 0, 0, 0, 0, 1))
     dx_dy = F.pad(dx_dy, (0, 0, 0, 1, 0, 0))
     dx_dz = F.pad(dx_dz, (0, 1, 0, 0, 0, 0))
@@ -166,18 +173,17 @@ def jacobian_det_loss(flow):
     dz_dy = F.pad(dz_dy, (0, 0, 0, 1, 0, 0))
     dz_dz = F.pad(dz_dz, (0, 1, 0, 0, 0, 0))
     
-    # Add identity
     dx_dx = dx_dx + 1.0
     dy_dy = dy_dy + 1.0
     dz_dz = dz_dz + 1.0
     
-    # Compute determinant
     det = (dx_dx * (dy_dy * dz_dz - dy_dz * dz_dy) -
            dx_dy * (dy_dx * dz_dz - dy_dz * dz_dx) +
            dx_dz * (dy_dx * dz_dy - dy_dy * dz_dx))
     
-    # Penalize negative determinants
-    return F.relu(-det).mean()
+    neg_det_loss = F.relu(-det).mean()
+    log_det_loss = torch.mean((torch.log(det.clamp(min=1e-6))) ** 2)
+    return neg_det_loss + 0.1 * log_det_loss
 
 
 def displacement_loss(flow):
@@ -287,8 +293,8 @@ class MRIRegistrationLoss(nn.Module):
         """
         loss_dict = {}
         
-        # MRI intensity losses
-        loss_dict['ncc'] = ncc_loss(warped_mri, sample_mri)
+        # MRI intensity losses (multi-scale NCC for better detail capture)
+        loss_dict['ncc'] = multi_scale_ncc_loss(warped_mri, sample_mri)
         loss_dict['mse'] = mse_loss(warped_mri, sample_mri)
         
         # Segmentation evaluation losses
@@ -328,17 +334,24 @@ class MRIRegistrationLoss(nn.Module):
 
 def compute_dice_score(y_pred, y_true, num_classes=5, epsilon=1e-5):
     """
-    Compute per-class Dice scores for evaluation.
+    Compute per-class Dice scores for evaluation using hard labels.
+    
+    Bilinear warping produces soft segmentation values, so we convert
+    to hard one-hot labels via argmax before computing Dice.
     
     Returns:
         dice_per_class: list of dice scores for each class
         mean_dice: average dice score
     """
+    y_pred_hard = F.one_hot(
+        y_pred.argmax(dim=1), num_classes
+    ).permute(0, 4, 1, 2, 3).float()
+
     dice_per_class = []
     vol_axes = [2, 3, 4]
     
     for c in range(num_classes):
-        pred_c = y_pred[:, c:c+1, ...]
+        pred_c = y_pred_hard[:, c:c+1, ...]
         true_c = y_true[:, c:c+1, ...]
         
         intersection = 2 * (pred_c * true_c).sum(dim=vol_axes)

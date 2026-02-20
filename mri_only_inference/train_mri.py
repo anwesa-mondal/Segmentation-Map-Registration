@@ -87,6 +87,10 @@ class Config:
         
         # Data Augmentation
         self.contrast_augmentation = cfg['augmentation']['contrast_augmentation']
+        self.aug_config = cfg['augmentation']
+        self.curriculum_augmentation = cfg['augmentation'].get('curriculum_augmentation', False)
+        self.curriculum_start_epoch = cfg['augmentation'].get('curriculum_start_epoch', 15)
+        self.curriculum_full_epoch = cfg['augmentation'].get('curriculum_full_epoch', 40)
         
         # Optimizer
         self.lr = cfg['training']['learning_rate']
@@ -136,19 +140,23 @@ class Config:
         
         # Data Augmentation
         self.contrast_augmentation = True
+        self.aug_config = {}
+        self.curriculum_augmentation = True
+        self.curriculum_start_epoch = 15
+        self.curriculum_full_epoch = 40
         
         # Optimizer
-        self.lr = 1e-4
+        self.lr = 5e-5
         self.min_lr = 1e-6
         self.weight_decay = 1e-5
-        self.warmup_epochs = 5
+        self.warmup_epochs = 10
         
         # AMP
         self.use_amp = False
         
         # Checkpointing
         self.save_every = 10
-        self.patience = 15
+        self.patience = 25
         
         # Device
         self.device = "cuda:4" if torch.cuda.is_available() else "cpu"
@@ -405,13 +413,14 @@ def main():
     train_dataset = MRIDataset(
         config.train_txt, config.template_mri_path, config.template_seg_path,
         target_size=config.target_size,
-        contrast_augmentation=config.contrast_augmentation  # Make model contrast-agnostic
+        contrast_augmentation=config.contrast_augmentation,
+        aug_config=config.aug_config,
     )
     # Validation dataset without augmentation for consistent evaluation
     val_dataset = MRIDataset(
         config.val_txt, config.template_mri_path, config.template_seg_path,
         target_size=config.target_size,
-        contrast_augmentation=False  # Always disable for validation
+        contrast_augmentation=False,
     )
     
     train_loader = DataLoader(
@@ -427,6 +436,8 @@ def main():
     logger.info(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
     if config.contrast_augmentation:
         logger.info("Contrast augmentation: ENABLED for training, DISABLED for validation")
+        if config.curriculum_augmentation:
+            logger.info(f"  -> Curriculum: ramp from epoch {config.curriculum_start_epoch} to {config.curriculum_full_epoch}")
         logger.info("  -> Model will be trained to be contrast-agnostic (robust to T1/T2/FLAIR/etc.)")
     else:
         logger.info("Contrast augmentation: DISABLED")
@@ -489,6 +500,18 @@ def main():
         
         # Update learning rate
         current_lr = scheduler.step(epoch - 1)
+        
+        # Update curriculum augmentation intensity
+        if config.contrast_augmentation and config.curriculum_augmentation:
+            if epoch < config.curriculum_start_epoch:
+                aug_intensity = 0.0
+            elif epoch >= config.curriculum_full_epoch:
+                aug_intensity = 1.0
+            else:
+                aug_intensity = (epoch - config.curriculum_start_epoch) / (
+                    config.curriculum_full_epoch - config.curriculum_start_epoch
+                )
+            train_dataset.set_aug_intensity(aug_intensity)
         
         # Train
         train_metrics = train_epoch(

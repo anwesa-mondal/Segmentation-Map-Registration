@@ -41,9 +41,35 @@ def load_config(config_path=None):
     return None
 
 
+def detect_and_correct_inversion(mri):
+    """
+    Detect and correct inverted MRI volumes.
+
+    Brain MRI (any weighting) has a dark background that dominates the
+    volume.  After [0,1] normalisation the median intensity should be
+    well below 0.5.  If it is above, the image is inverted and we flip
+    it back.  The threshold is intentionally generous -- a median above
+    0.5 is unambiguous inversion for brain scans.
+
+    Args:
+        mri: Tensor of shape (1, D, H, W) in [0, 1].
+    Returns:
+        Corrected tensor (same shape), bool indicating whether inversion
+        was applied.
+    """
+    median_val = mri.median().item()
+    if median_val > 0.5:
+        mri = 1.0 - mri
+        return mri, True
+    return mri, False
+
+
 class MRIDataset(Dataset):
     """
     Dataset for MRI-based registration with segmentation guidance.
+    
+    Supports curriculum-based contrast augmentation: augmentation strength
+    ramps from 0 to 1 over training via set_aug_intensity().
     
     Returns dict with:
         - template_mri: (1, D, H, W)
@@ -60,7 +86,8 @@ class MRIDataset(Dataset):
         target_size=(128, 128, 128),
         mri_filename="brain.npy",
         seg_filename="seg4_onehot.npy",
-        contrast_augmentation=True
+        contrast_augmentation=True,
+        aug_config=None,
     ):
         """
         Args:
@@ -70,42 +97,54 @@ class MRIDataset(Dataset):
             target_size: Target volume size
             mri_filename: MRI filename in each subject directory
             seg_filename: Segmentation filename in each subject directory
-            contrast_augmentation: If True, apply random contrast augmentation to simulate
-                                   different MRI weightings (T1, T2, FLAIR, etc.)
+            contrast_augmentation: If True, apply random contrast augmentation
+            aug_config: dict with augmentation ranges from config.yaml
         """
-        # Read subject paths
         with open(data_list_file, 'r') as f:
             seg_paths = f.read().splitlines()
         
-        # Get subject directories from segmentation paths
         self.subject_dirs = [os.path.dirname(p) for p in seg_paths]
         
         self.mri_filename = mri_filename
         self.seg_filename = seg_filename
         self.target_size = target_size
         self.contrast_augmentation = contrast_augmentation
+
+        # Augmentation parameters (defaults match tamed config values)
+        ac = aug_config or {}
+        gamma_range = ac.get('gamma_range', [0.7, 1.5])
+        scale_range = ac.get('scale_range', [0.85, 1.15])
+        offset_range = ac.get('offset_range', [-0.1, 0.1])
+        hist_range = ac.get('histogram_alpha_range', [0.85, 1.15])
+        self.gamma_lo, self.gamma_hi = gamma_range
+        self.scale_lo, self.scale_hi = scale_range
+        self.offset_lo, self.offset_hi = offset_range
+        self.hist_lo, self.hist_hi = hist_range
+        self.hist_shift_prob = ac.get('histogram_shift_prob', 0.3)
+        self.inversion_prob = ac.get('inversion_prob', 0.1)
+
+        # Curriculum intensity: 0.0 = no augmentation, 1.0 = full strength
+        self._aug_intensity = 1.0
         
-        # Load and preprocess template MRI
         self.template_mri = self._load_mri(template_mri_path, target_size)
-        
-        # Load and preprocess template segmentation
         self.template_seg = self._load_seg(template_seg_path, target_size)
+
+    def set_aug_intensity(self, intensity: float):
+        """Set curriculum augmentation intensity in [0, 1]."""
+        self._aug_intensity = max(0.0, min(1.0, intensity))
     
     def _load_mri(self, path, target_size):
         """Load and preprocess MRI volume."""
         mri = np.load(path)
         mri = torch.tensor(mri, dtype=torch.float32)
         
-        # Add channel dimension if needed
         if mri.ndim == 3:
-            mri = mri.unsqueeze(0)  # (1, D, H, W)
+            mri = mri.unsqueeze(0)
         
-        # Normalize to [0, 1]
         mri_min, mri_max = mri.min(), mri.max()
         if mri_max - mri_min > 0:
             mri = (mri - mri_min) / (mri_max - mri_min)
         
-        # Resize
         mri = F.interpolate(
             mri.unsqueeze(0),
             size=target_size,
@@ -113,6 +152,7 @@ class MRIDataset(Dataset):
             align_corners=False
         ).squeeze(0)
         
+        mri, _ = detect_and_correct_inversion(mri)
         return mri
     
     def _load_seg(self, path, target_size):
@@ -120,7 +160,6 @@ class MRIDataset(Dataset):
         seg = np.load(path)
         seg = torch.tensor(seg, dtype=torch.float32)
         
-        # Resize using nearest neighbor (for discrete labels)
         seg = F.interpolate(
             seg.unsqueeze(0),
             size=target_size,
@@ -131,58 +170,45 @@ class MRIDataset(Dataset):
     
     def _augment_contrast(self, mri):
         """
-        Apply random contrast augmentation to simulate different MRI weightings.
-        This makes the model contrast-agnostic by varying intensity distributions.
+        Apply random contrast augmentation scaled by curriculum intensity.
         
-        Optimized implementation with:
-        - In-place operations where possible
-        - Reduced tensor allocations
-        - Vectorized random sampling
-        - Single renormalization pass
-        
-        Transformations applied:
-        - Gamma correction (simulates different tissue contrasts)
-        - Intensity scaling and shifting
-        - Histogram shift (simulates different windowing)
-        - Random inversion (simulates T1 vs T2 contrast differences)
-        
-        Args:
-            mri: (1, D, H, W) normalized MRI tensor in [0, 1]
-        
-        Returns:
-            Augmented MRI tensor, still in [0, 1] range
+        All augmentation ranges are interpolated between identity (intensity=0)
+        and full range (intensity=1).
         """
-        # Clone once at the start
+        t = self._aug_intensity
+        if t < 1e-6:
+            return mri.clone()
+
         mri_aug = mri.clone()
         
-        # Generate all random values at once (more efficient)
         random_vals = torch.rand(4)
-        gamma = random_vals[0].item() * 1.5 + 0.5  # [0.5, 2.0]
-        scale = random_vals[1].item() * 0.6 + 0.7  # [0.7, 1.3]
-        offset = random_vals[2].item() * 0.4 - 0.2  # [-0.2, 0.2]
-        
-        # 1. Gamma correction (in-place)
-        # Low gamma (<1): brightens dark regions, simulates T2-like contrast
-        # High gamma (>1): darkens, simulates T1-like contrast
+
+        # Interpolate ranges toward identity (gamma=1, scale=1, offset=0)
+        gamma_lo = 1.0 + t * (self.gamma_lo - 1.0)
+        gamma_hi = 1.0 + t * (self.gamma_hi - 1.0)
+        gamma = random_vals[0].item() * (gamma_hi - gamma_lo) + gamma_lo
+
+        scale_lo = 1.0 + t * (self.scale_lo - 1.0)
+        scale_hi = 1.0 + t * (self.scale_hi - 1.0)
+        scale = random_vals[1].item() * (scale_hi - scale_lo) + scale_lo
+
+        offset_lo = t * self.offset_lo
+        offset_hi = t * self.offset_hi
+        offset = random_vals[2].item() * (offset_hi - offset_lo) + offset_lo
+
         mri_aug.pow_(gamma)
-        
-        # 2. Intensity scaling and offset (fused operation)
-        # Simulates different scanner calibrations and acquisition parameters
         mri_aug.mul_(scale).add_(offset)
         
-        # 3. Random histogram shift (50% probability)
-        # Compress or expand histogram around mean
-        if random_vals[3].item() < 0.5:
-            alpha = torch.rand(1).item() * 0.4 + 0.8  # [0.8, 1.2]
+        if random_vals[3].item() < self.hist_shift_prob * t:
+            alpha_lo = 1.0 + t * (self.hist_lo - 1.0)
+            alpha_hi = 1.0 + t * (self.hist_hi - 1.0)
+            alpha = torch.rand(1).item() * (alpha_hi - alpha_lo) + alpha_lo
             mean_val = mri_aug.mean()
             mri_aug.sub_(mean_val).mul_(alpha).add_(mean_val)
         
-        # 4. Random inversion (20% probability)
-        # Simulates T1 vs T2 contrast inversion
-        if torch.rand(1).item() < 0.2:
+        if torch.rand(1).item() < self.inversion_prob * t:
             mri_aug.neg_().add_(1.0)
         
-        # Single renormalization to [0, 1] range
         mri_min = mri_aug.min()
         mri_max = mri_aug.max()
         range_val = mri_max - mri_min
@@ -190,7 +216,6 @@ class MRIDataset(Dataset):
         if range_val > 1e-6:
             mri_aug.sub_(mri_min).div_(range_val)
         else:
-            # Fallback for edge case: uniform intensity
             mri_aug.clamp_(0, 1)
         
         return mri_aug
@@ -201,25 +226,24 @@ class MRIDataset(Dataset):
     def __getitem__(self, idx):
         subject_dir = self.subject_dirs[idx]
         
-        # Load sample MRI
         mri_path = os.path.join(subject_dir, self.mri_filename)
         sample_mri = self._load_mri(mri_path, self.target_size)
         
-        # Load sample segmentation
         seg_path = os.path.join(subject_dir, self.seg_filename)
         sample_seg = self._load_seg(seg_path, self.target_size)
         
-        # Apply contrast augmentation if enabled (for training)
         template_mri = self.template_mri
         if self.contrast_augmentation:
             template_mri = self._augment_contrast(template_mri)
             sample_mri = self._augment_contrast(sample_mri)
+            template_mri, _ = detect_and_correct_inversion(template_mri)
+            sample_mri, _ = detect_and_correct_inversion(sample_mri)
         
         return {
-            'template_mri': template_mri,        # (1, D, H, W)
-            'template_seg': self.template_seg,   # (5, D, H, W)
-            'sample_mri': sample_mri,            # (1, D, H, W)
-            'sample_seg': sample_seg,            # (5, D, H, W)
+            'template_mri': template_mri,
+            'template_seg': self.template_seg,
+            'sample_mri': sample_mri,
+            'sample_seg': sample_seg,
         }
 
 

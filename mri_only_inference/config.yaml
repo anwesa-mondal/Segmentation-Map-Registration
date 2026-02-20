@@ -52,24 +52,24 @@ model:
 training:
   # Basic training settings
   batch_size: 1
-  num_epochs: 60
+  num_epochs: 100
   num_workers: 0                 # DataLoader workers (0 for debugging)
   pin_memory: true
   
   # Optimizer settings (AdamW)
-  learning_rate: 1.0e-4
+  learning_rate: 5.0e-5
   min_learning_rate: 1.0e-6
   weight_decay: 1.0e-5
   
   # Learning rate schedule
-  warmup_epochs: 5               # Linear warmup before cosine annealing
+  warmup_epochs: 10              # Linear warmup before cosine annealing
   
   # Mixed precision training
   use_amp: false                 # Automatic Mixed Precision
   
   # Checkpointing and early stopping
   save_every: 10                 # Save checkpoint every N epochs
-  patience: 15                   # Early stopping patience (epochs without improvement)
+  patience: 25                   # Early stopping patience (epochs without improvement)
   
   # Gradient clipping
   max_grad_norm: 1.0
@@ -82,11 +82,17 @@ augmentation:
   contrast_augmentation: true
   
   # Contrast augmentation parameters (used in get_data_mri.py)
-  gamma_range: [0.5, 2.0]        # Gamma correction range
-  scale_range: [0.7, 1.3]        # Intensity scaling range
-  offset_range: [-0.2, 0.2]      # Intensity offset range
-  histogram_alpha_range: [0.8, 1.2]  # Histogram compression/expansion
-  inversion_prob: 0.2            # Probability of intensity inversion
+  gamma_range: [0.7, 1.5]        # Gamma correction range
+  scale_range: [0.85, 1.15]      # Intensity scaling range
+  offset_range: [-0.1, 0.1]      # Intensity offset range
+  histogram_alpha_range: [0.85, 1.15]  # Histogram compression/expansion
+  histogram_shift_prob: 0.3      # Probability of histogram shift
+  inversion_prob: 0.0            # Disabled: inversion is auto-corrected in preprocessing
+  
+  # Curriculum augmentation: ramp up augmentation strength over training
+  curriculum_augmentation: true
+  curriculum_start_epoch: 15     # No augmentation before this epoch
+  curriculum_full_epoch: 40      # Full augmentation strength at this epoch
 
 # -----------------------------------------------------------------------------
 # Loss Function Weights
@@ -97,29 +103,29 @@ loss:
   mse: 0.0                       # Mean Squared Error (optional)
   
   # Segmentation alignment losses
-  dice: 0.5                      # Dice loss for segmentation overlap
-  focal: 0.0                     # Focal loss for hard examples
-  boundary: 0.1                  # Boundary alignment loss
+  dice: 1.0                      # Dice loss for segmentation overlap
+  focal: 0.1                     # Focal loss for hard examples
+  boundary: 0.2                  # Boundary alignment loss
   
   # Geometric regularization
-  smoothness: 0.01               # First-order smoothness
-  bending: 0.001                 # Second-order smoothness (bending energy)
+  smoothness: 0.005              # First-order smoothness
+  bending: 0.0005                # Second-order smoothness (bending energy)
   jacobian: 0.1                  # Jacobian determinant (prevents folding)
-  displacement: 0.001            # Penalizes large displacements
+  displacement: 0.0005           # Penalizes large displacements
   
   # Lambda-based adaptive regularization
-  lambda_smoothness: 0.05        # Spatially-adaptive smoothness
-  lambda_prior: 0.01             # Lambda regularization
+  lambda_smoothness: 0.02        # Spatially-adaptive smoothness
+  lambda_prior: 0.005            # Lambda regularization
   
   # Multi-scale consistency
-  multi_scale: 0.01              # Consistency between flow scales
+  multi_scale: 0.005             # Consistency between flow scales
 
 # -----------------------------------------------------------------------------
 # Device Configuration
 # -----------------------------------------------------------------------------
 device:
   # CUDA device (e.g., "cuda:0", "cuda:4", or "cpu")
-  gpu: "cuda:4"
+  gpu: "cuda:6"
   
   # Enable cuDNN benchmark for faster training (disable for reproducibility)
   cudnn_benchmark: true
