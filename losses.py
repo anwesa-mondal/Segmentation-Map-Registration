@@ -56,7 +56,7 @@ def deformation_direction_variation(flow):
     grad_y = flow[:, :, :, 1:, :] - flow[:, :, :, :-1, :]
     grad_z = flow[:, :, :, :, 1:] - flow[:, :, :, :, :-1]
 
-    # Compute means independently to avoid shape mismatch
+
     loss_x = torch.mean(grad_x ** 2)
     loss_y = torch.mean(grad_y ** 2)
     loss_z = torch.mean(grad_z ** 2)
