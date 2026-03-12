@@ -6,6 +6,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import pandas as pd
+import gc
+
+gc.collect()
+torch.cuda.empty_cache()
+torch.cuda.reset_peak_memory_stats()
+
+# ====== ADDED FOR SURFACE LOSS ======
+import trimesh
+from skimage.measure import marching_cubes
+# ====================================
 
 from get_data import SegDataset
 from compoundlossfunction_2 import compound_loss
@@ -16,19 +26,24 @@ train_txt = "/content/drive/MyDrive/train_npy.txt"
 template_path = "/content/drive/MyDrive/brain_data_onehot/OASIS_OAS1_0406_MR1_seg4_onehot.npy"
 
 # ----------------- Params ----------------- #
-batch_size = 4
+batch_size = 1
 num_epochs = 30
 learning_rate = 2e-4
 weight_decay = 1e-5
-target_size = (128, 128, 128)
+target_size = (96, 96, 96)
+
+# ====== ADDED FOR SURFACE LOSS ======
+surface_weight = 0.01
+surface_compute_interval = 5  # compute every N batches
+# ====================================
 
 # AMP Toggle
-use_amp = False
+use_amp = True
 scaler = GradScaler(enabled=use_amp)
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
 print("Using device:", device)
 
 # ----------------- Dataset + Split ----------------- #
@@ -39,8 +54,8 @@ train_size = int(0.8 * len(full_dataset))
 test_size = len(full_dataset) - train_size
 train_dataset, test_dataset = random_split(full_dataset, [train_size, test_size])
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
 print(f"Dataset split: {train_size} train, {test_size} test")
 
@@ -50,6 +65,7 @@ stn = SpatialTransformer(size=target_size, device=device).to(device)
 
 optimizer = torch.optim.Adam(unet.parameters(), lr=learning_rate, weight_decay=weight_decay)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+
 
 # ----------------- Dynamic Loss Weights ----------------- #
 def get_loss_weights(epoch):
@@ -62,6 +78,57 @@ def get_loss_weights(epoch):
     else:
         return {"dice": 1.5, "cross_entropy": 0.0,
                 "lambda_smoothness": 0.1, "lambda_prior": 0.05, "displacement": 0.01}
+
+# ==============================
+# ====== ADDED FOR SURFACE LOSS ======
+# Mesh Utilities
+# ==============================
+
+def extract_mesh_from_onehot(onehot_seg):
+    seg_np = np.argmax(onehot_seg, axis=0)
+    verts, faces, _, _ = marching_cubes(seg_np, level=0.5)
+    return verts, faces
+
+def warp_mesh_vertices(vertices, flow, device):
+    flow = flow[0]
+    D, H, W = flow.shape[1:]
+
+    verts = torch.tensor(vertices.copy(), dtype=torch.float32, device=device)
+
+    v_norm = verts.clone()
+    v_norm[:, 0] = 2.0 * v_norm[:, 0] / (W - 1) - 1
+    v_norm[:, 1] = 2.0 * v_norm[:, 1] / (H - 1) - 1
+    v_norm[:, 2] = 2.0 * v_norm[:, 2] / (D - 1) - 1
+
+    v_norm = v_norm.view(1, -1, 1, 1, 3)
+
+    sampled_flow = F.grid_sample(
+        flow.unsqueeze(0),
+        v_norm,
+        align_corners=False
+    )
+
+    sampled_flow = sampled_flow.view(3, -1).T
+    warped_vertices = verts + sampled_flow
+
+    return warped_vertices.detach().cpu().numpy()
+
+def compute_surface_intersection_loss(vertices, faces):
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+    try:
+        intersecting = mesh.self_intersecting_faces
+        num_intersections = len(intersecting)
+    except:
+        num_intersections = 0
+
+    total_faces = len(faces)
+    if total_faces == 0:
+        return 0.0
+
+    return num_intersections / total_faces
+
+# ====================================
 
 # ----------------- Helpers ----------------- #
 train_losses = []
@@ -92,9 +159,6 @@ def jacobian_determinant(flow):
 # Blue (negative) → folds / self-intersections
 
 # Red (positive) → good orientation-preserving mapping
-
-
-
 
 
 def compare_lambda_effect(moving, fixed, model, stn, device, slice_index=None):
@@ -166,6 +230,7 @@ for epoch in range(1, num_epochs + 1):
     loss_weights = get_loss_weights(epoch)
 
     epoch_loss_dict = {k: 0.0 for k in loss_weights.keys()}
+    epoch_loss_dict["surface"] = 0.0  # ====== ADDED FOR SURFACE LOSS ======
 
     print(f"\n--- Epoch {epoch}/{num_epochs} ---")
     for batch_idx, (moving, fixed) in enumerate(train_loader):
@@ -176,6 +241,19 @@ for epoch in range(1, num_epochs + 1):
             flow, lambda_map = unet(x)
             warped = stn(moving, flow)
             loss, loss_dict = compound_loss(warped, fixed, flow, lambda_map, loss_weights)
+            # ====== ADDED FOR SURFACE LOSS ======
+            if batch_idx % surface_compute_interval == 0:
+                moving_np = moving[0].detach().cpu().numpy()
+                verts, faces = extract_mesh_from_onehot(moving_np)
+                warped_verts = warp_mesh_vertices(verts, flow, device)
+                surface_loss_value = compute_surface_intersection_loss(warped_verts, faces)
+                surface_loss = torch.tensor(surface_loss_value, device=device)
+            else:
+                surface_loss = torch.tensor(0.0, device=device)
+
+            loss = loss + surface_weight * surface_loss
+            loss_dict["surface"] = surface_loss
+            # =====================================
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -250,15 +328,7 @@ plt.legend()
 plt.grid(True)
 plt.show()
 
-# ----------------- Final Visualization ----------------- #
+
 unet.eval()
 stn.eval()
 
-# with torch.no_grad():
-#     for moving, fixed in test_loader:
-#         moving, fixed = moving.to(device), fixed.to(device)
-#         x = torch.cat([moving, fixed], dim=1)
-#         flow, lambda_map = unet(x)
-#         warped = stn(moving, flow)
-#         show_alignment(moving.cpu(), warped.cpu(), fixed.cpu(),flow.cpu())
-#         break
