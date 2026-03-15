@@ -12,22 +12,27 @@ from compoundlossfunction_2 import compound_loss
 from model_1 import UNet, SpatialTransformer, AffineNet, affine_to_dense_displacement
 
 # ----------------- Paths ----------------- #
-train_txt = "/content/drive/MyDrive/train_npy.txt"
-template_path = "/content/drive/MyDrive/brain_data_onehot/OASIS_OAS1_0406_MR1_seg4_onehot.npy"
+train_txt = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/train.txt"
+template_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/seg4_onehot.npy"
 
 # ----------------- Params ----------------- #
 batch_size = 4
-num_epochs = 30
-learning_rate = 2e-4
+num_epochs = 50
+learning_rate = 1e-4
 weight_decay = 1e-5
 target_size = (128, 128, 128)
 
+# ----------------- Resume ----------------- #
+resume = True          # Set to True to resume from checkpoint
+epochs_done = 30         # Number of epochs already completed
+prev_best_dice = 0.9564   # Previous best dice score
+
 # AMP Toggle
-use_amp = False
+use_amp = True
 scaler = GradScaler(enabled=use_amp)
 
 # Device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 torch.backends.cudnn.benchmark = True
 print("Using device:", device)
 
@@ -158,11 +163,20 @@ def dice_score(pred, target, epsilon=1e-5):
     return dice.mean(dim=1)
 
 best_dice = -1.0
-best_model_path = "/content/drive/MyDrive/trained_model.pth"
+best_model_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/anwesa-affine/trained_model.pth"
 
+# ----------------- Resume from checkpoint ----------------- #
+if resume:
+    checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
+    affine_net.load_state_dict(checkpoint["affine_state_dict"])
+    unet.load_state_dict(checkpoint["model_state_dict"])
+    best_dice = prev_best_dice
+    print(f"Resumed from checkpoint (epoch {epochs_done}, best dice {best_dice:.4f})")
+
+start_epoch = epochs_done + 1 if resume else 1
 
 # ----------------- Training ----------------- #
-for epoch in range(1, num_epochs + 1):
+for epoch in range(start_epoch, start_epoch + num_epochs):
     affine_net.train()
     unet.train()
     total_loss = 0
@@ -174,7 +188,7 @@ for epoch in range(1, num_epochs + 1):
     for batch_idx, (moving, fixed) in enumerate(train_loader):
         moving, fixed = moving.to(device, non_blocking=True), fixed.to(device, non_blocking=True)
 
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp):
             # Stage 1: affine pre-alignment
             affine_matrix = affine_net(moving, fixed)                       # (B, 4, 4)
             affine_disp = affine_to_dense_displacement(affine_matrix, target_size)  # (B, 3, D, H, W)
@@ -193,7 +207,7 @@ for epoch in range(1, num_epochs + 1):
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         total_loss += loss.item()
 
@@ -248,12 +262,9 @@ for epoch in range(1, num_epochs + 1):
     print("Loss breakdown:", loss_break)
     print("Loss Weights:", loss_weights)
 
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-
 # ----------------- Save + Plot ----------------- #
 df = pd.DataFrame(loss_log)
-df.to_csv("/content/drive/MyDrive/loss_log_1.csv", index=False)
+df.to_csv("/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/anwesa-affine/loss_log_1.csv", index=False)
 print("📈 Loss log saved.")
 
 plt.figure(figsize=(12, 6))
