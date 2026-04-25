@@ -130,8 +130,8 @@ plt.style.use('dark_background')
 sns.set_palette("husl")
 
 # Class labels for OASIS brain segmentation
-CLASS_NAMES = ['Background', 'CSF', 'Gray Matter', 'White Matter', 'Deep GM']
-CLASS_COLORS = ['#1a1a2e', '#16213e', '#0f3460', '#e94560', '#533483']
+CLASS_NAMES = ['Background', 'Cortex', 'Subcortical GM', 'White Matter', 'CSF']
+CLASS_COLORS = ['#111111', '#ff6b6b', '#ffa500', '#ffd700', '#4cc9f0']
 
 
 # =============================================================================

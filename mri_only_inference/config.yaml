@@ -47,6 +47,17 @@ model:
   seg_channels: 5                # Same as num_classes for one-hot encoding
 
 # -----------------------------------------------------------------------------
+# Affine Pre-alignment
+# -----------------------------------------------------------------------------
+affine:
+  # Enable affine pre-alignment stage before deformable registration
+  enabled: false
+
+  # Regularization weights (keeps affine close to identity, prevents shearing)
+  regularization_weight: 0.01
+  orthogonality_weight: 0.01
+
+# -----------------------------------------------------------------------------
 # Training Hyperparameters
 # -----------------------------------------------------------------------------
 training:
@@ -144,10 +155,10 @@ visualization:
   # Class names for OASIS brain segmentation
   class_names:
     - "Background"
-    - "CSF"
-    - "Gray Matter"
+    - "Cortex"
+    - "Subcortical GM"
     - "White Matter"
-    - "Deep GM"
+    - "CSF"
 
 # -----------------------------------------------------------------------------
 # Logging

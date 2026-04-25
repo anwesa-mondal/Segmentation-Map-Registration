@@ -67,52 +67,59 @@ class Config:
         self.val_txt = cfg['data']['val_txt']
         self.template_mri_path = cfg['data']['template_mri_path']
         self.template_seg_path = cfg['data']['template_seg_path']
-        
+
         # Output
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         base_dir = cfg['output']['base_dir']
         self.output_dir = f"{base_dir}/{timestamp}"
         self.checkpoint_dir = os.path.join(self.output_dir, cfg['output']['checkpoint_subdir'])
         self.log_dir = os.path.join(self.output_dir, cfg['output']['log_subdir'])
-        
+
         # Model
         self.target_size = tuple(cfg['model']['target_size'])
         self.num_classes = cfg['model']['num_classes']
-        
+
+        # Affine pre-alignment
+        affine_cfg = cfg.get('affine', {})
+        self.use_affine = affine_cfg.get('enabled', False)
+
         # Training
         self.batch_size = cfg['training']['batch_size']
         self.num_epochs = cfg['training']['num_epochs']
         self.num_workers = cfg['training']['num_workers']
         self.pin_memory = cfg['training']['pin_memory']
-        
+
         # Data Augmentation
         self.contrast_augmentation = cfg['augmentation']['contrast_augmentation']
         self.aug_config = cfg['augmentation']
         self.curriculum_augmentation = cfg['augmentation'].get('curriculum_augmentation', False)
         self.curriculum_start_epoch = cfg['augmentation'].get('curriculum_start_epoch', 15)
         self.curriculum_full_epoch = cfg['augmentation'].get('curriculum_full_epoch', 40)
-        
+
         # Optimizer
         self.lr = cfg['training']['learning_rate']
         self.min_lr = cfg['training']['min_learning_rate']
         self.weight_decay = cfg['training']['weight_decay']
         self.warmup_epochs = cfg['training']['warmup_epochs']
-        
+
         # AMP
         self.use_amp = cfg['training']['use_amp']
-        
+
         # Checkpointing
         self.save_every = cfg['training']['save_every']
         self.patience = cfg['training']['patience']
-        
+
         # Device
         self.device = cfg['device']['gpu'] if torch.cuda.is_available() else "cpu"
-        
+
         # Resume
         self.resume_from = cfg['resume']['checkpoint_path']
-        
-        # Loss weights (store for later use)
+
+        # Loss weights (merge affine weights from config)
         self.loss_weights = cfg['loss']
+        if self.use_affine:
+            self.loss_weights.setdefault('affine_reg', affine_cfg.get('regularization_weight', 0.01))
+            self.loss_weights.setdefault('affine_ortho', affine_cfg.get('orthogonality_weight', 0.01))
     
     def _set_defaults(self):
         """Set default configuration (fallback if no YAML)."""
@@ -121,49 +128,50 @@ class Config:
         self.val_txt = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/val.txt"
         self.template_mri_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/brain.npy"
         self.template_seg_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/seg4_onehot.npy"
-        
+
         # Output
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.output_dir = f"/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/training_mri_acm/{timestamp}"
         self.checkpoint_dir = os.path.join(self.output_dir, "checkpoints")
         self.log_dir = os.path.join(self.output_dir, "logs")
-        
+
         # Model
         self.target_size = (128, 128, 128)
         self.num_classes = 5
-        
+        self.use_affine = False
+
         # Training
         self.batch_size = 1
         self.num_epochs = 60
         self.num_workers = 0
         self.pin_memory = True
-        
+
         # Data Augmentation
         self.contrast_augmentation = True
         self.aug_config = {}
         self.curriculum_augmentation = True
         self.curriculum_start_epoch = 15
         self.curriculum_full_epoch = 40
-        
+
         # Optimizer
         self.lr = 5e-5
         self.min_lr = 1e-6
         self.weight_decay = 1e-5
         self.warmup_epochs = 10
-        
+
         # AMP
         self.use_amp = False
-        
+
         # Checkpointing
         self.save_every = 10
         self.patience = 25
-        
+
         # Device
         self.device = "cuda:4" if torch.cuda.is_available() else "cpu"
-        
+
         # Resume
         self.resume_from = None
-        
+
         # Loss weights
         self.loss_weights = None
     
@@ -262,19 +270,27 @@ def train_epoch(model, stn, dataloader, loss_fn, optimizer, scaler, device, epoc
         
         with torch.cuda.amp.autocast(enabled=config.use_amp):
             # Forward pass
-            final_flow, intermediate_flows, lambda_maps, attention_maps = model(
+            final_flow, intermediate_flows, lambda_maps, attention_maps, affine_matrix = model(
                 template_mri, template_seg, sample_mri
             )
-            
+
             # Warp template using predicted deformation
-            warped_mri = stn(template_mri, final_flow)
-            warped_seg = stn(template_seg, final_flow)
-            
+            # When affine is used, warp the affine-aligned template
+            if affine_matrix is not None:
+                affine_grid = F.affine_grid(affine_matrix, template_mri.size(), align_corners=False)
+                aligned_mri = F.grid_sample(template_mri, affine_grid, mode='bilinear', padding_mode='border', align_corners=False)
+                aligned_seg = F.grid_sample(template_seg, affine_grid, mode='nearest', padding_mode='border', align_corners=False)
+                warped_mri = stn(aligned_mri, final_flow)
+                warped_seg = stn(aligned_seg, final_flow)
+            else:
+                warped_mri = stn(template_mri, final_flow)
+                warped_seg = stn(template_seg, final_flow)
+
             # Compute loss
             loss, loss_dict = loss_fn(
                 warped_mri, sample_mri, warped_seg, sample_seg,
                 final_flow, intermediate_flows, lambda_maps,
-                return_components=True
+                affine_matrix=affine_matrix, return_components=True
             )
         
         # Backward pass
@@ -325,19 +341,26 @@ def validate_epoch(model, stn, dataloader, loss_fn, device, epoch, config):
         sample_seg = batch['sample_seg'].to(device)
         
         # Forward pass
-        final_flow, intermediate_flows, lambda_maps, attention_maps = model(
+        final_flow, intermediate_flows, lambda_maps, attention_maps, affine_matrix = model(
             template_mri, template_seg, sample_mri
         )
-        
-        # Warp template
-        warped_mri = stn(template_mri, final_flow)
-        warped_seg = stn(template_seg, final_flow)
-        
+
+        # Warp template (compose affine + deformation when affine is used)
+        if affine_matrix is not None:
+            affine_grid = F.affine_grid(affine_matrix, template_mri.size(), align_corners=False)
+            aligned_mri = F.grid_sample(template_mri, affine_grid, mode='bilinear', padding_mode='border', align_corners=False)
+            aligned_seg = F.grid_sample(template_seg, affine_grid, mode='nearest', padding_mode='border', align_corners=False)
+            warped_mri = stn(aligned_mri, final_flow)
+            warped_seg = stn(aligned_seg, final_flow)
+        else:
+            warped_mri = stn(template_mri, final_flow)
+            warped_seg = stn(template_seg, final_flow)
+
         # Compute loss
         loss, loss_dict = loss_fn(
             warped_mri, sample_mri, warped_seg, sample_seg,
             final_flow, intermediate_flows, lambda_maps,
-            return_components=True
+            affine_matrix=affine_matrix, return_components=True
         )
         
         # Track metrics
@@ -447,11 +470,14 @@ def main():
     # ==========================================================================
     logger.info("Initializing model...")
     
-    model = MRIRegistrationNet(seg_channels=config.num_classes).to(device)
+    model = MRIRegistrationNet(
+        seg_channels=config.num_classes, use_affine=config.use_affine
+    ).to(device)
     stn = SpatialTransformer(size=config.target_size, device=device).to(device)
-    
+
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model parameters: {num_params:,}")
+    logger.info(f"Affine pre-alignment: {'ENABLED' if config.use_affine else 'DISABLED'}")
     
     # Loss function (use weights from config if available)
     loss_fn = MRIRegistrationLoss(weights=config.loss_weights)

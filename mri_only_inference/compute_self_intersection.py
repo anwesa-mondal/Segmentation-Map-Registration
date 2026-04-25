@@ -187,7 +187,7 @@ def main():
             sample_seg = data['sample_seg'].unsqueeze(0).to(device)
             
             # Forward pass
-            final_flow, intermediate_flows, lambda_maps, attention_maps = model(
+            final_flow, intermediate_flows, lambda_maps, attention_maps, _ = model(
                 template_mri, template_seg, sample_mri
             )
             

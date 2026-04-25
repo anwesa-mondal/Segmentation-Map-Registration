@@ -134,7 +134,7 @@ def evaluate(model, stn, dataloader, device, num_classes=5):
         sample_mri = batch['sample_mri'].to(device)
         sample_seg = batch['sample_seg'].to(device)
 
-        final_flow, _, _, _ = model(template_mri, template_seg, sample_mri)
+        final_flow, _, _, _, _ = model(template_mri, template_seg, sample_mri)
         warped_seg = stn(template_seg, final_flow)
 
         dice_per_class, mean_dice = compute_dice_score(warped_seg, sample_seg, num_classes)
@@ -173,7 +173,8 @@ def main():
     print()
 
     # --- Model ---
-    model = MRIRegistrationNet(seg_channels=num_classes).to(device)
+    use_affine = cfg.get('affine', {}).get('enabled', False)
+    model = MRIRegistrationNet(seg_channels=num_classes, use_affine=use_affine).to(device)
     stn = SpatialTransformer(size=target_size, device=device).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)

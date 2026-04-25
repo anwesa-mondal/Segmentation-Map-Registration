@@ -22,6 +22,57 @@ import torch.nn.functional as F
 # Building Blocks
 # =============================================================================
 
+class AffineNet(nn.Module):
+    """
+    Predicts a 3x4 affine transformation matrix for coarse alignment.
+
+    Takes concatenated [template_mri, sample_mri] as input and predicts
+    an affine matrix initialized to identity. Used as a pre-alignment
+    step before the deformable registration network.
+    """
+    def __init__(self, in_channels=2):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_channels, 16, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(16),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.MaxPool3d(2),
+            nn.Conv3d(16, 32, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(32),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.MaxPool3d(2),
+            nn.Conv3d(32, 64, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(64),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.AdaptiveAvgPool3d(1)
+        )
+        self.fc = nn.Linear(64, 12)
+        # Initialize to identity transform
+        self.fc.weight.data.zero_()
+        self.fc.bias.data.copy_(torch.tensor([
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0
+        ], dtype=torch.float))
+
+    def forward(self, template_mri, sample_mri):
+        """
+        Args:
+            template_mri: (B, 1, D, H, W)
+            sample_mri: (B, 1, D, H, W)
+        Returns:
+            affine_matrix: (B, 3, 4)
+        """
+        x = torch.cat([template_mri, sample_mri], dim=1)
+        features = self.conv(x).view(x.size(0), -1)
+        affine_params = self.fc(features)
+        return affine_params.view(-1, 3, 4)
+
+
+# =============================================================================
+# Building Blocks
+# =============================================================================
+
 class ConvBlock(nn.Module):
     """Basic conv block with InstanceNorm and LeakyReLU."""
     def __init__(self, in_channels, out_channels):
@@ -326,24 +377,32 @@ class MultiScaleDecoder(nn.Module):
 class MRIRegistrationNet(nn.Module):
     """
     MRI-Guided Registration Network
-    
+
+    Optionally includes an affine pre-alignment stage that coarsely aligns the
+    template to the sample before predicting a dense deformation field.
+
     Input:
         - template_mri: (B, 1, D, H, W) - template MRI scan
         - template_seg: (B, 5, D, H, W) - template segmentation (for guidance)
         - sample_mri: (B, 1, D, H, W) - sample MRI to register to
-    
+
     Output:
-        - final_flow: (B, 3, D, H, W) - deformation field
+        - final_flow: (B, 3, D, H, W) - deformation field (in affine-aligned space when affine is used)
         - intermediate_flows: list of flows at each scale
         - lambda_maps: list of lambda maps for adaptive regularization
         - attention_maps: list of attention maps from SAM
+        - affine_matrix: (B, 3, 4) or None - predicted affine matrix
     """
-    def __init__(self, seg_channels=5):
+    def __init__(self, seg_channels=5, use_affine=False):
         super().__init__()
-        
+
+        self.use_affine = use_affine
+        if use_affine:
+            self.affine_net = AffineNet(in_channels=2)
+
         self.encoder = DualStreamEncoder(mri_channels=2, seg_channels=seg_channels)
         self.decoder = MultiScaleDecoder(seg_channels=seg_channels)
-    
+
     def forward(self, template_mri, template_seg, sample_mri):
         """
         Args:
@@ -351,18 +410,32 @@ class MRIRegistrationNet(nn.Module):
             template_seg: (B, 5, D, H, W)
             sample_mri: (B, 1, D, H, W)
         """
+        affine_matrix = None
+
+        if self.use_affine:
+            affine_matrix = self.affine_net(template_mri, sample_mri)
+            affine_grid = F.affine_grid(affine_matrix, template_mri.size(), align_corners=False)
+            template_mri = F.grid_sample(
+                template_mri, affine_grid, mode='bilinear',
+                padding_mode='border', align_corners=False
+            )
+            template_seg = F.grid_sample(
+                template_seg, affine_grid, mode='nearest',
+                padding_mode='border', align_corners=False
+            )
+
         # Concatenate MRI inputs
         mri_input = torch.cat([template_mri, sample_mri], dim=1)  # (B, 2, D, H, W)
-        
+
         # Encode
         skip_connections, bottleneck, attention_maps = self.encoder(mri_input, template_seg)
-        
+
         # Decode with anatomical correction
         final_flow, intermediate_flows, lambda_maps = self.decoder(
             bottleneck, skip_connections, template_seg
         )
-        
-        return final_flow, intermediate_flows, lambda_maps, attention_maps
+
+        return final_flow, intermediate_flows, lambda_maps, attention_maps, affine_matrix
 
 
 # =============================================================================

@@ -1,0 +1,128 @@
+# =============================================================================
+# .gitignore for Segmentation Map Registration
+# =============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+
+# Data files (large — not for git)
+*.npy
+*.npz
+*.nii
+*.nii.gz
+*.h5
+*.hdf5
+*.mat
+*.pkl
+*.pickle
+data/
+datasets/
+raw_data/
+processed_data/
+
+# Model checkpoints & outputs
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+checkpoints/
+saved_models/
+outputs/
+results/
+training_*/
+viz_output/
+
+# Logs & output files
+*.log
+*.out
+otpt.txt
+logs/
+tensorboard/
+wandb/
+mlruns/
+
+# Visualization outputs
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+figures/
+plots/
+visualizations/
+
+# Temporary files
+*.tmp
+*.bak
+.cache/
+tmp/
+temp/
+
+# OS generated
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# Secrets & credentials
+.env
+.env.*
+*.pem
+*.key
+secrets.yaml
+config.local.yaml
+credentials.json
+
+# SLURM / HPC
+slurm-*.out
+*.sbatch
+job_logs/
+
+# Profiling & coverage
+*.prof
+*.lprof
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Exceptions
+!requirements.txt
+!environment.yaml
+!setup.py
+!pyproject.toml
+!README.md
+!LICENSE
+!CHANGELOG.md

@@ -222,6 +222,34 @@ def lambda_prior_loss(lambda_map, mean_val=0.5, std_val=0.2):
 # Multi-scale Consistency
 # =============================================================================
 
+# =============================================================================
+# Affine Regularization Losses
+# =============================================================================
+
+def affine_regularization_loss(affine_matrix):
+    """
+    Penalizes deviation of the predicted affine from identity.
+    Keeps the affine transform small so the deformable stage handles fine detail.
+    """
+    identity = torch.eye(3, 4, device=affine_matrix.device).unsqueeze(0)
+    return F.mse_loss(affine_matrix, identity.expand_as(affine_matrix))
+
+
+def affine_orthogonality_loss(affine_matrix):
+    """
+    Encourages the rotation component (3x3 submatrix) to be orthogonal,
+    preventing shearing and non-rigid distortions in the affine stage.
+    """
+    R = affine_matrix[:, :3, :3]
+    RtR = torch.bmm(R.transpose(1, 2), R)
+    I = torch.eye(3, device=R.device).unsqueeze(0).expand_as(RtR)
+    return F.mse_loss(RtR, I)
+
+
+# =============================================================================
+# Multi-scale Consistency
+# =============================================================================
+
 def multi_scale_consistency_loss(intermediate_flows):
     """Ensures consistency between multi-scale flows."""
     if len(intermediate_flows) < 2:
@@ -256,31 +284,36 @@ class MRIRegistrationLoss(nn.Module):
             # MRI intensity losses
             'ncc': 1.0,                    # Primary MRI matching
             'mse': 0.0,                    # Optional MSE (usually 0)
-            
+
             # Segmentation evaluation losses
             'dice': 0.5,                   # Segmentation alignment
             'focal': 0.0,                  # Hard examples (optional)
             'boundary': 0.1,               # Boundary alignment
-            
+
             # Geometric regularization
             'smoothness': 0.01,            # First-order smoothness
             'bending': 0.001,              # Second-order smoothness
             'jacobian': 0.1,               # Prevent folding
             'displacement': 0.001,         # Prevent large deformations
-            
+
             # Lambda-based adaptive
             'lambda_smoothness': 0.05,     # Adaptive smoothness
             'lambda_prior': 0.01,          # Lambda regularization
-            
+
             # Multi-scale
             'multi_scale': 0.01,           # Scale consistency
+
+            # Affine regularization (only used when affine is enabled)
+            'affine_reg': 0.01,            # Deviation from identity
+            'affine_ortho': 0.01,          # Orthogonality of rotation component
         }
     
-    def forward(self, warped_mri, sample_mri, warped_seg, sample_seg, 
-                final_flow, intermediate_flows, lambda_maps, return_components=False):
+    def forward(self, warped_mri, sample_mri, warped_seg, sample_seg,
+                final_flow, intermediate_flows, lambda_maps,
+                affine_matrix=None, return_components=False):
         """
         Compute comprehensive loss.
-        
+
         Args:
             warped_mri: (B, 1, D, H, W) - warped template MRI
             sample_mri: (B, 1, D, H, W) - target MRI
@@ -289,25 +322,26 @@ class MRIRegistrationLoss(nn.Module):
             final_flow: (B, 3, D, H, W) - final deformation field
             intermediate_flows: list of multi-scale flows
             lambda_maps: list of lambda maps
+            affine_matrix: (B, 3, 4) or None - predicted affine matrix
             return_components: whether to return individual losses
         """
         loss_dict = {}
-        
+
         # MRI intensity losses (multi-scale NCC for better detail capture)
         loss_dict['ncc'] = multi_scale_ncc_loss(warped_mri, sample_mri)
         loss_dict['mse'] = mse_loss(warped_mri, sample_mri)
-        
+
         # Segmentation evaluation losses
         loss_dict['dice'] = dice_loss(warped_seg, sample_seg)
         loss_dict['focal'] = focal_loss(warped_seg, sample_seg)
         loss_dict['boundary'] = boundary_loss(warped_seg, sample_seg)
-        
+
         # Geometric regularization
         loss_dict['smoothness'] = smoothness_loss(final_flow)
         loss_dict['bending'] = bending_energy_loss(final_flow)
         loss_dict['jacobian'] = jacobian_det_loss(final_flow)
         loss_dict['displacement'] = displacement_loss(final_flow)
-        
+
         # Lambda-based adaptive regularization
         if lambda_maps is not None and len(lambda_maps) > 0:
             final_lambda = lambda_maps[-1]
@@ -316,13 +350,21 @@ class MRIRegistrationLoss(nn.Module):
         else:
             loss_dict['lambda_smoothness'] = torch.tensor(0.0, device=final_flow.device)
             loss_dict['lambda_prior'] = torch.tensor(0.0, device=final_flow.device)
-        
+
         # Multi-scale consistency
         loss_dict['multi_scale'] = multi_scale_consistency_loss(intermediate_flows)
-        
+
+        # Affine regularization
+        if affine_matrix is not None:
+            loss_dict['affine_reg'] = affine_regularization_loss(affine_matrix)
+            loss_dict['affine_ortho'] = affine_orthogonality_loss(affine_matrix)
+        else:
+            loss_dict['affine_reg'] = torch.tensor(0.0, device=final_flow.device)
+            loss_dict['affine_ortho'] = torch.tensor(0.0, device=final_flow.device)
+
         # Compute total weighted loss
-        total_loss = sum(self.weights[k] * loss_dict[k] for k in loss_dict.keys())
-        
+        total_loss = sum(self.weights.get(k, 0.0) * loss_dict[k] for k in loss_dict.keys())
+
         if return_components:
             return total_loss, loss_dict
         return total_loss
