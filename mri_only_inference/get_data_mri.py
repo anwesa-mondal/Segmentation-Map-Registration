@@ -79,7 +79,7 @@ class MRIDataset(Dataset):
     """
     
     def __init__(
-        self, 
+        self,
         data_list_file: str,
         template_mri_path: str,
         template_seg_path: str,
@@ -88,6 +88,7 @@ class MRIDataset(Dataset):
         seg_filename="seg4_onehot.npy",
         contrast_augmentation=True,
         aug_config=None,
+        preload=True,
     ):
         """
         Args:
@@ -99,12 +100,13 @@ class MRIDataset(Dataset):
             seg_filename: Segmentation filename in each subject directory
             contrast_augmentation: If True, apply random contrast augmentation
             aug_config: dict with augmentation ranges from config.yaml
+            preload: If True, preload all volumes into RAM at init (eliminates per-epoch I/O)
         """
         with open(data_list_file, 'r') as f:
             seg_paths = f.read().splitlines()
-        
+
         self.subject_dirs = [os.path.dirname(p) for p in seg_paths]
-        
+
         self.mri_filename = mri_filename
         self.seg_filename = seg_filename
         self.target_size = target_size
@@ -125,9 +127,29 @@ class MRIDataset(Dataset):
 
         # Curriculum intensity: 0.0 = no augmentation, 1.0 = full strength
         self._aug_intensity = 1.0
-        
+
         self.template_mri = self._load_mri(template_mri_path, target_size)
         self.template_seg = self._load_seg(template_seg_path, target_size)
+
+        # Preload all subject volumes into RAM to eliminate per-batch NFS I/O
+        self._mri_cache = None
+        self._seg_cache = None
+        if preload:
+            self._preload_all()
+
+    def _preload_all(self):
+        """Load all subject volumes into RAM once to eliminate per-epoch NFS I/O."""
+        from tqdm import tqdm
+        n = len(self.subject_dirs)
+        print(f"Preloading {n} subjects into RAM...")
+        self._mri_cache = []
+        self._seg_cache = []
+        for subject_dir in tqdm(self.subject_dirs, desc="Preloading", ncols=80):
+            mri = self._load_mri(os.path.join(subject_dir, self.mri_filename), self.target_size)
+            seg = self._load_seg(os.path.join(subject_dir, self.seg_filename), self.target_size)
+            self._mri_cache.append(mri)
+            self._seg_cache.append(seg)
+        print(f"Preloading complete. RAM cached {n} MRI + {n} seg volumes.")
 
     def set_aug_intensity(self, intensity: float):
         """Set curriculum augmentation intensity in [0, 1]."""
@@ -224,14 +246,14 @@ class MRIDataset(Dataset):
         return len(self.subject_dirs)
     
     def __getitem__(self, idx):
-        subject_dir = self.subject_dirs[idx]
-        
-        mri_path = os.path.join(subject_dir, self.mri_filename)
-        sample_mri = self._load_mri(mri_path, self.target_size)
-        
-        seg_path = os.path.join(subject_dir, self.seg_filename)
-        sample_seg = self._load_seg(seg_path, self.target_size)
-        
+        if self._mri_cache is not None:
+            sample_mri = self._mri_cache[idx]
+            sample_seg = self._seg_cache[idx]
+        else:
+            subject_dir = self.subject_dirs[idx]
+            sample_mri = self._load_mri(os.path.join(subject_dir, self.mri_filename), self.target_size)
+            sample_seg = self._load_seg(os.path.join(subject_dir, self.seg_filename), self.target_size)
+
         template_mri = self.template_mri
         if self.contrast_augmentation:
             template_mri = self._augment_contrast(template_mri)

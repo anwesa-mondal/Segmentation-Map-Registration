@@ -11,14 +11,19 @@ from pathlib import Path
 # CONFIGURE HERE
 # =============================================================================
 
-CHECKPOINT = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/training_mri_acm/20260220_161929/checkpoints/best_model.pth"
+CHECKPOINT = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/training_mri_acm_fixed/20260426_113359/checkpoints/best_model.pth"
+
+# OASIS
 INPUT_MRI_TEMPLATE  = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/scans/OASIS_OAS1_{idx}_MR1/brain.npy"
-# INPUT_MRI_TEMPLATE  = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/soham_data/fomo-60k/sub_{idx}/ses_1/t1.nii.gz"
 INPUT_SEG_TEMPLATE  = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/anna_data/oasis_dataset/oasis_synthseg_output/output/OASIS_OAS1_{idx}_MR1/orig_synthseg.nii.gz"
-# INPUT_SEG_TEMPLATE  = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/anna_data/fomo60k_synthseg_data/output/output/sub_{idx}/ses_1/t1_synthseg.nii.gz"
 OUTPUT_DIR_TEMPLATE = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/anna_data/nishchay_results/OASIS_OAS1_{idx}_MR1"
+
+# FOMO60K - Make sure to put flag = "fomo60k" in inference.py too
+# INPUT_MRI_TEMPLATE  = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/soham_data/fomo-60k/sub_{idx}/ses_1/t1.nii.gz"
+# INPUT_SEG_TEMPLATE  = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/anna_data/fomo60k_synthseg_data/output/output/sub_{idx}/ses_1/t1_synthseg.nii.gz"
 # OUTPUT_DIR_TEMPLATE = "/shared/home/v_nishchay_nilabh/shared_scratch/oasis_data/anna_data/nishchay_results_fomo60k/sub_{idx}/ses_1"
-DEVICE = "cuda:4"
+
+DEVICE = "cuda:3"
 
 INFERENCE_SCRIPT = Path(__file__).parent / "inference.py"
 
@@ -29,14 +34,13 @@ RESUME_EPOCH = 38
 dice_scores = {}
 skipped = []
 
-# for i in range(1, 41):
-for i in range(RESUME_EPOCH, 100):
+for i in range(1, 100):
     idx = f"{i:04d}"
-    # idx = i
+# for i in range(1, 41):
+    # idx = f"{i:01d}"
     input_mri = INPUT_MRI_TEMPLATE.format(idx=idx)
     input_seg = INPUT_SEG_TEMPLATE.format(idx=idx)
     output_dir = OUTPUT_DIR_TEMPLATE.format(idx=idx)
-
     # Skip if input files don't exist
     if not Path(input_mri).exists() or not Path(input_seg).exists():
         print(f"[{idx}] SKIP — input files not found")

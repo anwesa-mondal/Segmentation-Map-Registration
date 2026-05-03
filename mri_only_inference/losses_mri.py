@@ -73,20 +73,24 @@ def mse_loss(y_pred, y_true):
 
 def dice_loss(y_pred, y_true, smooth=1e-5):
     """
-    Dice loss for segmentation overlap.
-    
+    Dice loss for segmentation overlap — foreground classes only (skips class 0).
+
     Args:
         y_pred: (B, C, D, H, W) - warped segmentation
         y_true: (B, C, D, H, W) - target segmentation
     """
     ndims = len(y_pred.shape) - 2
     vol_axes = list(range(2, ndims + 2))
-    
+
+    # Exclude background (class 0) from both prediction and target
+    y_pred = y_pred[:, 1:]
+    y_true = y_true[:, 1:]
+
     intersection = (y_pred * y_true).sum(dim=vol_axes)
     union = y_pred.sum(dim=vol_axes) + y_true.sum(dim=vol_axes)
-    
+
     dice_score = (2. * intersection + smooth) / (union + smooth)
-    
+
     return 1 - dice_score.mean()
 
 
@@ -217,10 +221,6 @@ def lambda_prior_loss(lambda_map, mean_val=0.5, std_val=0.2):
     """Gaussian prior on lambda values."""
     return torch.mean((lambda_map - mean_val) ** 2 / (2 * std_val ** 2))
 
-
-# =============================================================================
-# Multi-scale Consistency
-# =============================================================================
 
 # =============================================================================
 # Affine Regularization Losses
@@ -401,4 +401,6 @@ def compute_dice_score(y_pred, y_true, num_classes=5, epsilon=1e-5):
         dice = (intersection + epsilon) / (union + epsilon)
         dice_per_class.append(dice.mean().item())
     
-    return dice_per_class, sum(dice_per_class) / len(dice_per_class)
+    # Mean over foreground classes only (skip background at index 0)
+    fg_mean = sum(dice_per_class[1:]) / (num_classes - 1) if num_classes > 1 else dice_per_class[0]
+    return dice_per_class, fg_mean

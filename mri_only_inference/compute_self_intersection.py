@@ -25,11 +25,17 @@ import argparse
 from pathlib import Path
 from tqdm import tqdm
 import json
+import yaml
 
 # Local imports
 from model_mri import MRIRegistrationNet, SpatialTransformer
 from losses_mri import compute_dice_score, jacobian_det_loss
 from get_data_mri import MRIDataset
+
+
+def _load_config(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
 
 
 def compute_self_intersection_loss(flow):
@@ -121,35 +127,54 @@ def main():
                        help='Device to run inference on')
     parser.add_argument('--target_size', type=int, nargs=3, default=[128, 128, 128],
                        help='Target volume size')
-    
+    parser.add_argument('--config', type=str, default=None,
+                       help='Path to config.yaml (reads use_affine and data paths)')
+
     args = parser.parse_args()
-    
+
+    # Load config (falls back to defaults if not provided)
+    cfg = None
+    config_path = args.config or (Path(__file__).parent / "config.yaml")
+    if Path(config_path).exists():
+        cfg = _load_config(config_path)
+
     # Build paths
     base_dir = f"/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/training_mri_acm/{args.which_timestamp}"
     checkpoint_path = f"{base_dir}/checkpoints/best_model.pth"
-    
+
     target_size = tuple(args.target_size)
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    
-    # Data paths
-    if args.data_split == 'val':
-        data_list = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/val.txt"
+
+    # Data paths — prefer config, fall back to hardcoded defaults
+    if cfg is not None:
+        template_mri_path = cfg['data']['template_mri_path']
+        template_seg_path = cfg['data']['template_seg_path']
+        if args.data_split == 'val':
+            data_list = cfg['data']['val_txt']
+        else:
+            data_list = cfg['data']['train_txt']
     else:
-        data_list = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/train.txt"
-    
-    template_mri_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/brain.npy"
-    template_seg_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/seg4_onehot.npy"
-    
+        if args.data_split == 'val':
+            data_list = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/val.txt"
+        else:
+            data_list = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/train.txt"
+        template_mri_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/brain.npy"
+        template_seg_path = "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/scans/OASIS_OAS1_0406_MR1/seg4_onehot.npy"
+
+    # Read use_affine from config so checkpoint and model always match
+    use_affine = cfg.get('affine', {}).get('enabled', False) if cfg else False
+
     print("=" * 70)
     print("SELF-INTERSECTION LOSS ANALYSIS")
     print("=" * 70)
     print(f"\nCheckpoint: {checkpoint_path}")
     print(f"Device: {device}")
     print(f"Data split: {args.data_split}")
-    
+    print(f"use_affine: {use_affine}")
+
     # Load model
     print("\nLoading model...")
-    model = MRIRegistrationNet(seg_channels=5).to(device)
+    model = MRIRegistrationNet(seg_channels=5, use_affine=use_affine).to(device)
     stn = SpatialTransformer(size=target_size, device=device).to(device)
     
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -187,12 +212,18 @@ def main():
             sample_seg = data['sample_seg'].unsqueeze(0).to(device)
             
             # Forward pass
-            final_flow, intermediate_flows, lambda_maps, attention_maps, _ = model(
+            final_flow, intermediate_flows, lambda_maps, attention_maps, affine_matrix = model(
                 template_mri, template_seg, sample_mri
             )
-            
-            # Warp template
-            warped_seg = stn(template_seg, final_flow)
+
+            # Warp template: compose affine + deformation when affine is enabled
+            if affine_matrix is not None:
+                affine_grid = F.affine_grid(affine_matrix, template_mri.size(), align_corners=False)
+                aligned_seg = F.grid_sample(template_seg, affine_grid, mode='nearest',
+                                            padding_mode='border', align_corners=False)
+                warped_seg = stn(aligned_seg, final_flow)
+            else:
+                warped_seg = stn(template_seg, final_flow)
             
             # Compute metrics
             dice_per_class, mean_dice = compute_dice_score(warped_seg, sample_seg)

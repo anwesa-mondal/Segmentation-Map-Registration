@@ -447,11 +447,11 @@ class SpatialTransformer(nn.Module):
     def __init__(self, size, device='cpu'):
         super().__init__()
         D, H, W = size
-        
-        # Create identity grid
-        lin_z = torch.linspace(-1, 1, D, device=device)
-        lin_y = torch.linspace(-1, 1, H, device=device)
-        lin_x = torch.linspace(-1, 1, W, device=device)
+
+        # Pixel-centre coordinates under align_corners=False:  (2*i + 1)/N - 1
+        lin_z = (2 * torch.arange(D, device=device).float() + 1) / D - 1
+        lin_y = (2 * torch.arange(H, device=device).float() + 1) / H - 1
+        lin_x = (2 * torch.arange(W, device=device).float() + 1) / W - 1
         zz, yy, xx = torch.meshgrid(lin_z, lin_y, lin_x, indexing='ij')
         
         id_grid = torch.stack((xx, yy, zz), dim=-1)

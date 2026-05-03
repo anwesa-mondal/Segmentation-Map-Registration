@@ -30,7 +30,7 @@ data:
 # -----------------------------------------------------------------------------
 output:
   # Base directory for training outputs (timestamp will be appended)
-  base_dir: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/training_mri_acm"
+  base_dir: "/shared/scratch/0/home/v_nishchay_nilabh/oasis_data/training_mri_acm_affine"
   
   # Subdirectory names
   checkpoint_subdir: "checkpoints"
@@ -51,7 +51,8 @@ model:
 # -----------------------------------------------------------------------------
 affine:
   # Enable affine pre-alignment stage before deformable registration
-  enabled: false
+  # Set to true only after validating an affine-trained checkpoint exists
+  enabled: true
 
   # Regularization weights (keeps affine close to identity, prevents shearing)
   regularization_weight: 0.01
@@ -90,7 +91,7 @@ training:
 # -----------------------------------------------------------------------------
 augmentation:
   # Contrast augmentation makes model robust to different MRI weightings (T1/T2/FLAIR)
-  contrast_augmentation: true
+  contrast_augmentation: false
   
   # Contrast augmentation parameters (used in get_data_mri.py)
   gamma_range: [0.7, 1.5]        # Gamma correction range
@@ -132,13 +133,18 @@ loss:
   multi_scale: 0.005             # Consistency between flow scales
 
 # -----------------------------------------------------------------------------
+# Reproducibility
+# -----------------------------------------------------------------------------
+seed: 42                           # Global random seed for torch, numpy, python
+
+# -----------------------------------------------------------------------------
 # Device Configuration
 # -----------------------------------------------------------------------------
 device:
   # CUDA device (e.g., "cuda:0", "cuda:4", or "cpu")
-  gpu: "cuda:6"
-  
-  # Enable cuDNN benchmark for faster training (disable for reproducibility)
+  gpu: "cuda:5"
+
+  # cuDNN benchmark speeds up training by auto-selecting fastest kernels
   cudnn_benchmark: true
 
 # -----------------------------------------------------------------------------

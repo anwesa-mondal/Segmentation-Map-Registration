@@ -134,8 +134,16 @@ def evaluate(model, stn, dataloader, device, num_classes=5):
         sample_mri = batch['sample_mri'].to(device)
         sample_seg = batch['sample_seg'].to(device)
 
-        final_flow, _, _, _, _ = model(template_mri, template_seg, sample_mri)
-        warped_seg = stn(template_seg, final_flow)
+        final_flow, _, _, _, affine_matrix = model(template_mri, template_seg, sample_mri)
+
+        # Compose affine + deformation when affine stage is enabled
+        if affine_matrix is not None:
+            affine_grid = F.affine_grid(affine_matrix, template_mri.size(), align_corners=False)
+            aligned_seg = F.grid_sample(template_seg, affine_grid, mode='nearest',
+                                        padding_mode='border', align_corners=False)
+            warped_seg = stn(aligned_seg, final_flow)
+        else:
+            warped_seg = stn(template_seg, final_flow)
 
         dice_per_class, mean_dice = compute_dice_score(warped_seg, sample_seg, num_classes)
         all_dice.append(mean_dice)

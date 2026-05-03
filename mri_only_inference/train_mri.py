@@ -24,6 +24,8 @@ import sys
 import json
 import logging
 import time
+import signal
+from contextlib import contextmanager
 import yaml
 import argparse
 from pathlib import Path
@@ -111,9 +113,13 @@ class Config:
 
         # Device
         self.device = cfg['device']['gpu'] if torch.cuda.is_available() else "cpu"
+        self.cudnn_benchmark = cfg['device'].get('cudnn_benchmark', True)
 
         # Resume
         self.resume_from = cfg['resume']['checkpoint_path']
+
+        # Reproducibility
+        self.seed = cfg.get('seed', 42)
 
         # Loss weights (merge affine weights from config)
         self.loss_weights = cfg['loss']
@@ -168,9 +174,13 @@ class Config:
 
         # Device
         self.device = "cuda:4" if torch.cuda.is_available() else "cpu"
+        self.cudnn_benchmark = True
 
         # Resume
         self.resume_from = None
+
+        # Reproducibility
+        self.seed = 42
 
         # Loss weights
         self.loss_weights = None
@@ -242,6 +252,36 @@ class WarmupCosineScheduler:
             param_group['lr'] = lr
         
         return lr
+
+
+# =============================================================================
+# NFS-safe Checkpoint Save
+# =============================================================================
+
+@contextmanager
+def _timeout(seconds):
+    def _handler(signum, frame):
+        raise TimeoutError(f"I/O timed out after {seconds}s")
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def safe_save(obj, path, logger=None, timeout=300):
+    """torch.save with a hard timeout to survive NFS hangs."""
+    try:
+        with _timeout(timeout):
+            torch.save(obj, path)
+    except TimeoutError as e:
+        if logger:
+            logger.warning(f"Checkpoint save timed out ({path}): {e} — skipping")
+    except Exception as e:
+        if logger:
+            logger.warning(f"Checkpoint save failed ({path}): {e} — skipping")
 
 
 # =============================================================================
@@ -404,7 +444,14 @@ def main():
     
     # Configuration
     config = Config(args.config)
-    
+
+    # Reproducibility
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed_all(config.seed)
+    np.random.seed(config.seed)
+    torch.backends.cudnn.benchmark = config.cudnn_benchmark
+    torch.backends.cudnn.deterministic = not config.cudnn_benchmark
+
     # Create directories
     for dir_path in [config.output_dir, config.checkpoint_dir, config.log_dir]:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
@@ -424,7 +471,6 @@ def main():
     # Device
     device = torch.device(config.device)
     if 'cuda' in config.device:
-        torch.backends.cudnn.benchmark = True
         logger.info(f"GPU: {torch.cuda.get_device_name()}")
     
     # ==========================================================================
@@ -584,10 +630,10 @@ def main():
             }
             
             if is_best:
-                torch.save(checkpoint, os.path.join(config.checkpoint_dir, "best_model.pth"))
-            
+                safe_save(checkpoint, os.path.join(config.checkpoint_dir, "best_model.pth"), logger)
+
             if epoch % config.save_every == 0:
-                torch.save(checkpoint, os.path.join(config.checkpoint_dir, f"checkpoint_epoch_{epoch:03d}.pth"))
+                safe_save(checkpoint, os.path.join(config.checkpoint_dir, f"checkpoint_epoch_{epoch:03d}.pth"), logger)
         
         # Early stopping
         if epochs_without_improvement >= config.patience:

@@ -47,6 +47,7 @@ from scipy.ndimage import distance_transform_edt, binary_erosion
 # Set to "fomo60k" when running inference on fomo60K targets (fixes OASIS→fomo60K orientation mismatch).
 # Set to "" or any other value to skip the fix.
 FLAG = ""
+# FLAG = "fomo60k"
 
 import matplotlib
 matplotlib.use('Agg')
@@ -491,7 +492,8 @@ def run_inference(args):
     target_size = tuple(cfg['model']['target_size'])
     num_classes = cfg['model']['num_classes']
     class_names = cfg['visualization']['class_names']
-    use_affine = cfg.get('affine', {}).get('enabled', False)
+    # use_affine = cfg.get('affine', {}).get('enabled', False)
+    use_affine = False
     device = torch.device(args.device)
 
     output_dir = Path(args.output_dir)
@@ -714,8 +716,8 @@ def main():
                         help='Path to config.yaml (default: config.yaml in script directory)')
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Directory to save results')
-    parser.add_argument('--device', type=str, default='cuda:4',
-                        help='Device (e.g. cuda:4, cpu)')
+    parser.add_argument('--device', type=str, default='cuda:0',
+                        help='Device (e.g. cuda:0, cpu)')
     parser.add_argument('--losses_only', action='store_true',
                         help='Compute and save losses only; skip all visualizations and NIfTI output')
     args = parser.parse_args()
